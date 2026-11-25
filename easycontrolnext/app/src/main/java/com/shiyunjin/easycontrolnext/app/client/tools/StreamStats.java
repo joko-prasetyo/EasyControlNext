@@ -29,6 +29,17 @@ public final class StreamStats {
   private long lastRttUs = -1;
 
   private volatile boolean reconnecting = false;
+  // Current smoothness-buffer delay (ms), for the log line
+  private volatile int bufferMs = 0;
+  private volatile String transport = "tcp";
+
+  public void setTransport(String transport) {
+    this.transport = transport;
+  }
+
+  public void setBufferMs(int ms) {
+    bufferMs = ms;
+  }
 
   // Stutter metrics: longest gap between frames arriving from the network and between decoded frames
   private long lastReceiveNs = 0;
@@ -112,7 +123,7 @@ public final class StreamStats {
     Log.i("EasyControlStats", "fps=" + Math.round(renderedFrames / seconds) + " recv=" + Math.round(receivedFrames / seconds)
       + " kbps=" + Math.round(receivedBytes * 8 / seconds / 1000) + " lat_p50=" + p50 + " lat_p95=" + p95 + " lat_max=" + max
       + " rtt=" + (lastRttUs / 1000) + " recv_gap_max=" + maxReceiveGapNs / 1_000_000 + " render_gap_max=" + maxRenderGapNs / 1_000_000
-      + " gaps50=" + renderGaps50 + " gaps100=" + renderGaps100 + (reconnecting ? " reconnecting" : ""));
+      + " gaps50=" + renderGaps50 + " gaps100=" + renderGaps100 + " buf=" + bufferMs + " via=" + transport + (reconnecting ? " reconnecting" : ""));
     maxReceiveGapNs = 0;
     maxRenderGapNs = 0;
     renderGaps50 = 0;

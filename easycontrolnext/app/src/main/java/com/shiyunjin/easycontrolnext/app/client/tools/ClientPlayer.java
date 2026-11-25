@@ -43,6 +43,8 @@ public class ClientPlayer {
   // 不依赖TCP自身超时：Wi-Fi静默断开时TCP可能要十几分钟才报错，期间画面会一直冻结
   private static final int STREAM_TIMEOUT = 1000 * 5;
   private volatile long lastReceiveTime = System.currentTimeMillis();
+  private volatile long lastMainTime = System.currentTimeMillis();
+  private volatile long lastVideoTime = System.currentTimeMillis();
   // 视频确认(流控)：本连接已送入解码器的累计帧数
   private final AtomicInteger videoFramesDone = new AtomicInteger(0);
   private final AtomicBoolean videoAckPending = new AtomicBoolean(false);
@@ -71,6 +73,7 @@ public class ClientPlayer {
       while (!Thread.interrupted()) {
         byte type = clientStream.readByteFromMain();
         lastReceiveTime = System.currentTimeMillis();
+        lastMainTime = lastReceiveTime;
         switch (type) {
           case AUDIO_EVENT:
             ByteBuffer audioFrame = clientStream.readFrameFromMain();
@@ -131,28 +134,68 @@ public class ClientPlayer {
         decoderFailed("video decoder: " + e);
         return;
       }
+      if (csd0 == ClientStream.UDP_SWITCH || csd1 == ClientStream.UDP_SWITCH) throw new IOException("udp switch before codec config");
       ackVideoFrames(useH265 ? 1 : 2);
+      clientStream.onVideoStarted();
+      // Smoothness buffer (Settings): evens out Wi-Fi jitter before the decoder. 0 = frames go straight in
+      int maxBufferMs = AppData.setting.getJitterBufferMax();
+      final VideoDecode decoder = videoDecode;
+      if (maxBufferMs > 0) jitterBuffer = new JitterBuffer(maxBufferMs, decoder::decodeIn);
+      UdpVideoReceiver udp = null;
       while (!Thread.interrupted()) {
-        ByteBuffer frame = clientStream.readFrameFromVideo();
-        lastReceiveTime = System.currentTimeMillis();
+        ByteBuffer frame;
+        if (udp != null) {
+          UdpVideoReceiver.Frame received = udp.take();
+          lastReceiveTime = System.currentTimeMillis();
+          lastVideoTime = lastReceiveTime;
+          // Frame numbers are the server's; a skipped (lost) frame still counts as done for flow control
+          ackVideoTo(received.seq + 1);
+          if (received.data == null) continue;
+          frame = received.data;
+        } else {
+          frame = clientStream.readFrameFromVideo();
+          if (frame == ClientStream.UDP_SWITCH) {
+            udp = clientStream.getUdpReceiver();
+            if (udp == null) throw new IOException("udp switch without receiver");
+            udp.start(clientStream.getUdpFirstFrame(), useH265, () -> clientController.runOnControlThread(() -> {
+              try {
+                clientStream.writeToMain(ControlPacket.createKeyframeRequest());
+              } catch (Exception ignored) {
+              }
+            }, 0));
+            clientController.stats.setTransport("udp");
+            continue;
+          }
+          lastReceiveTime = System.currentTimeMillis();
+          lastVideoTime = lastReceiveTime;
+          // Acknowledge on arrival: the server measures the network, not our deliberate buffering.
+          // A decoder that cannot keep up still shows: the buffer's queue fills, push() blocks and the acks stop
+          ackVideoFrames(1);
+        }
         clientController.stats.onVideoFrame(frame.remaining());
         try {
-          videoDecode.decodeIn(frame);
+          if (jitterBuffer != null) {
+            jitterBuffer.push(frame);
+            clientController.stats.setBufferMs(jitterBuffer.delayMs());
+          } else videoDecode.decodeIn(frame);
         } catch (RuntimeException e) {
           decoderFailed("video decode: " + e);
           return;
         }
-        ackVideoFrames(1);
       }
     } catch (InterruptedException ignored) {
     } catch (Exception e) {
       // 以前这里的异常被直接忽略：视频线程退出后画面永久冻结，而会话看起来仍然“在线”
       connectionLost("video: " + e);
     } finally {
+      // The buffer thread feeds the decoder: stop it before releasing the decoder
+      if (jitterBuffer != null) jitterBuffer.stop();
       if (videoDecode != null) videoDecode.release();
       if (surface != null) surface.release();
     }
   }
+
+  private volatile JitterBuffer jitterBuffer = null;
 
   // 回报已处理的帧数。在解码器接收之后才确认：解码跟不上时服务端同样能发现积压。
   // 最多每VIDEO_ACK_INTERVAL毫秒发一次(只发最新的累计值)：服务端判断拥塞的阈值是400ms，不需要逐帧确认，
@@ -162,6 +205,20 @@ public class ClientPlayer {
 
   private void ackVideoFrames(int frames) {
     videoFramesDone.addAndGet(frames);
+    scheduleVideoAck();
+  }
+
+  // Absolute count (UDP: the server's frame numbers)
+  private void ackVideoTo(int count) {
+    int current;
+    do {
+      current = videoFramesDone.get();
+      if (count <= current) return;
+    } while (!videoFramesDone.compareAndSet(current, count));
+    scheduleVideoAck();
+  }
+
+  private void scheduleVideoAck() {
     if (!videoAckPending.compareAndSet(false, true)) return;
     clientController.runOnControlThread(() -> {
       videoAckPending.set(false);
@@ -183,6 +240,15 @@ public class ClientPlayer {
         return;
       }
       if (System.currentTimeMillis() - lastReceiveTime > STREAM_TIMEOUT) {
+        // Where were the readers when data stopped? (diagnostics: network silence vs a stuck reader)
+        StringBuilder where = new StringBuilder();
+        for (Thread thread : new Thread[]{mainStreamInThread, videoStreamInThread}) {
+          where.append("\n  ").append(thread.getName()).append(" ").append(thread.getState());
+          StackTraceElement[] stack = thread.getStackTrace();
+          for (int i = 0; i < Math.min(8, stack.length); i++) where.append("\n    at ").append(stack[i]);
+        }
+        PublicTools.logToast("player", "watchdog: no data for " + STREAM_TIMEOUT + " ms; last main " + (System.currentTimeMillis() - lastMainTime)
+          + " ms ago, last video " + (System.currentTimeMillis() - lastVideoTime) + " ms ago" + where, false);
         connectionLost("timeout: no data for " + STREAM_TIMEOUT + "ms");
         return;
       }
@@ -191,6 +257,7 @@ public class ClientPlayer {
 
   private void connectionLost(String reason) {
     if (isClose || failed) return;
+    PublicTools.logToast("player", "connection lost: " + reason, false);
     Client.sendAction(uuid, "connectionLost", ByteBuffer.wrap(reason.getBytes(StandardCharsets.UTF_8)), 0);
   }
 

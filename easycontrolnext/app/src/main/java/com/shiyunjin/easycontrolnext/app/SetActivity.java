@@ -30,6 +30,9 @@ public class SetActivity extends Activity {
   private void drawUi() {
     // 其他
     activitySetBinding.setOther.addView(ViewTools.createSwitchCard(this, getString(R.string.set_other_show_stats), getString(R.string.set_other_show_stats_detail), AppData.setting.getShowStats(), isChecked -> AppData.setting.setShowStats(isChecked)).getRoot());
+    activitySetBinding.setOther.addView(ViewTools.createSwitchCard(this, getString(R.string.set_other_udp_video), getString(R.string.set_other_udp_video_detail), AppData.setting.getUdpVideo(), isChecked -> AppData.setting.setUdpVideo(isChecked)).getRoot());
+    android.widget.ArrayAdapter<String> jitterAdapter = new android.widget.ArrayAdapter<>(this, R.layout.item_spinner_item, new String[]{"0", "50", "100", "150", "250"});
+    activitySetBinding.setOther.addView(ViewTools.createSpinnerCard(this, getString(R.string.set_other_jitter_buffer), getString(R.string.set_other_jitter_buffer_detail), String.valueOf(AppData.setting.getJitterBufferMax()), jitterAdapter, str -> AppData.setting.setJitterBufferMax(Integer.parseInt(str))).getRoot());
     activitySetBinding.setOther.addView(ViewTools.createTextCard(this, getString(R.string.set_other_ip), () -> startActivity(new Intent(this, IpActivity.class))).getRoot());
     activitySetBinding.setOther.addView(ViewTools.createTextCard(this, getString(R.string.set_other_custom_key), () -> startActivity(new Intent(this, AdbKeyActivity.class))).getRoot());
     activitySetBinding.setOther.addView(ViewTools.createTextCard(this, getString(R.string.set_other_reset_key), () -> {

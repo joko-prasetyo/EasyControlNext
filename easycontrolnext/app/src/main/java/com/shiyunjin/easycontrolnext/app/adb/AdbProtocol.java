@@ -29,9 +29,21 @@ public class AdbProtocol {
   public static final int CONNECT_MAXDATA_NETWORK = 1024 * 1024;
 
   public static final byte[] CONNECT_PAYLOAD = "host::\0".getBytes();
+  // Banner that also announces the "delayed_ack" feature. The ';' matters: adbd keeps the trailing NUL in the
+  // banner string, and without a separator the last feature would be read as "delayed_ack\0" (= unknown)
+  public static final byte[] CONNECT_PAYLOAD_DELAYED_ACK = "host::features=delayed_ack;\0".getBytes();
+  public static final String FEATURE_DELAYED_ACK = "delayed_ack";
+  // delayed_ack: how many bytes the device may send on one stream before it has to wait for our OKAYs.
+  // Without it adbd sends one packet and waits for the OKAY every time, so a single OKAY delayed by Wi-Fi
+  // (100-400 ms is common on a busy 2.4 GHz link) stops the whole video stream for that long
+  public static final int DELAYED_ACK_WINDOW = 2 * 1024 * 1024;
 
   public static ByteBuffer generateConnect(int maxData) {
-    return generateMessage(CMD_CNXN, CONNECT_VERSION, maxData, CONNECT_PAYLOAD);
+    return generateConnect(maxData, false);
+  }
+
+  public static ByteBuffer generateConnect(int maxData, boolean offerDelayedAck) {
+    return generateMessage(CMD_CNXN, CONNECT_VERSION, maxData, offerDelayedAck ? CONNECT_PAYLOAD_DELAYED_ACK : CONNECT_PAYLOAD);
   }
 
   public static ByteBuffer generateAuth(int type, byte[] data) {
@@ -39,10 +51,16 @@ public class AdbProtocol {
   }
 
   public static ByteBuffer generateOpen(int localId, String dest) {
-    ByteBuffer bbuf = ByteBuffer.allocate(dest.length() + 1);
-    bbuf.put(dest.getBytes(StandardCharsets.UTF_8));
+    return generateOpen(localId, dest, 0);
+  }
+
+  // window: initial delayed_ack credit for the device (0 when delayed_ack is not in use)
+  public static ByteBuffer generateOpen(int localId, String dest, int window) {
+    byte[] destBytes = dest.getBytes(StandardCharsets.UTF_8);
+    ByteBuffer bbuf = ByteBuffer.allocate(destBytes.length + 1);
+    bbuf.put(destBytes);
     bbuf.put((byte) 0);
-    return generateMessage(CMD_OPEN, localId, 0, bbuf.array());
+    return generateMessage(CMD_OPEN, localId, window, bbuf.array());
   }
 
   public static ByteBuffer generateWrite(int localId, int remoteId, byte[] data) {
@@ -55,6 +73,14 @@ public class AdbProtocol {
 
   public static ByteBuffer generateOkay(int localId, int remoteId) {
     return generateMessage(CMD_OKAY, localId, remoteId, null);
+  }
+
+  // With delayed_ack every OKAY must carry the number of bytes consumed (little-endian int32);
+  // an OKAY without it makes adbd drop the connection
+  public static ByteBuffer generateOkay(int localId, int remoteId, int ackedBytes) {
+    byte[] payload = new byte[4];
+    ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).putInt(ackedBytes);
+    return generateMessage(CMD_OKAY, localId, remoteId, payload);
   }
 
   private static ByteBuffer generateMessage(int cmd, int arg0, int arg1, byte[] payload) {

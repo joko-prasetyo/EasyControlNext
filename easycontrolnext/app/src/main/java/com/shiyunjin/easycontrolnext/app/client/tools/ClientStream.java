@@ -41,6 +41,17 @@ public class ClientStream {
   private volatile BufferStream videoBufferStream;
   private Thread connectThread = null;
   private final byte[] token;
+  // UDP video (see UdpVideoReceiver): negotiated in the background after every (re)connect
+  private volatile UdpVideoReceiver udpReceiver = null;
+  private volatile int udpFirstFrame = 0;
+  private int connectionCount = 0;
+  // The switch may only be requested once the decoder has its first (TCP) frames: a marker arriving before
+  // them would be taken for codec config
+  private boolean videoStarted = false;
+  private boolean udpGoPending = false;
+  private int udpGoSession = 0;
+  // Returned by readFrameFromVideo when the server moved video to UDP
+  public static final ByteBuffer UDP_SWITCH = ByteBuffer.allocate(0);
   private static String serverName = null;
   private static final String serverLog = "/data/local/tmp/easycontrolnext_server.log";
   private static final boolean supportH265 = DecodecTools.isSupportH265();
@@ -69,6 +80,7 @@ public class ClientStream {
         adb = AdbTools.connectADB(device);
         startServer(device);
         connectServer(device, timeoutDelay);
+        negotiateUdp(device);
         handle.run(true);
       } catch (Exception e) {
         PublicTools.logToast("stream", e.toString(), true);
@@ -154,68 +166,84 @@ public class ClientStream {
     adb.runAdbCmd("trap '' HUP; S=$(command -v setsid); $S " + serverCmd + " </dev/null >" + serverLog + " 2>&1 &");
   }
 
-  // 连接Server：先尝试直连，失败再走ADB中转
+  // Path that worked last time; tried first on the next (re)connect
+  private boolean preferAdb = false;
+
+  // 连接Server：直连与ADB中转交替尝试，直到成功或超时。
+  // 以前先把一半的超时时间全部花在直连上：被控端端口不可直达时(例如redroid的端口没有映射出来)，
+  // 直连永远被拒绝，每次连接都白等数秒(首次约7.5秒，断线重连约2秒)才轮到ADB
   private void connectServer(Device device, int timeout) throws Exception {
     long deadline = System.currentTimeMillis() + timeout;
-    if (!device.isLinkDevice()) {
-      long directDeadline = System.currentTimeMillis() + timeout / 2;
-      InetSocketAddress address = new InetSocketAddress(PublicTools.getIp(device.address), device.serverPort);
-      while (true) {
-        Socket main = null;
-        Socket video = null;
-        try {
-          main = connectSocket(address, ROLE_MAIN, directDeadline);
-          video = connectSocket(address, ROLE_VIDEO, directDeadline);
-          OutputStream mainOut = main.getOutputStream();
-          // 带缓冲读取：readInt/readByte不再每个字节一次系统调用
-          DataInputStream mainIn = new DataInputStream(new BufferedInputStream(main.getInputStream(), 16 * 1024));
-          DataInputStream videoIn = new DataInputStream(new BufferedInputStream(video.getInputStream(), 64 * 1024));
-          synchronized (this) {
-            mainSocket = main;
-            videoSocket = video;
-            mainOutputStream = mainOut;
-            mainDataInputStream = mainIn;
-            videoDataInputStream = videoIn;
-            connectDirect = true;
-            connected = true;
-          }
-          abortIfClosed();
-          return;
-        } catch (Exception ignored) {
-          closeQuietly(main);
-          closeQuietly(video);
-          if (isClose) throw new IOException("closed");
-          if (System.currentTimeMillis() + retryInterval >= directDeadline) break;
-          Thread.sleep(retryInterval);
-        }
-      }
-    }
-    // 直连失败尝试ADB中转
+    boolean canDirect = !device.isLinkDevice();
+    InetSocketAddress address = canDirect ? new InetSocketAddress(PublicTools.getIp(device.address), device.serverPort) : null;
     while (true) {
-      BufferStream main = null;
-      BufferStream video = null;
-      try {
-        if (adb == null || adb.isClosed()) adb = AdbTools.connectADB(device);
-        // 每次打开都受本次尝试剩余时间限制：ADB连接若已无声无息地失效，不会每次都卡满默认超时
-        main = adb.tcpForward(device.serverPort, (int) Math.max(1000, deadline - System.currentTimeMillis()));
-        main.write(ByteBuffer.wrap(hello(ROLE_MAIN)));
-        // 为了减少adb同步阻塞的问题，此处分开音视频流
-        video = adb.tcpForward(device.serverPort, (int) Math.max(1000, deadline - System.currentTimeMillis()));
-        video.write(ByteBuffer.wrap(hello(ROLE_VIDEO)));
-        synchronized (this) {
-          mainBufferStream = main;
-          videoBufferStream = video;
-          connectDirect = false;
-          connected = true;
-        }
-        abortIfClosed();
-        return;
-      } catch (Exception ignored) {
-        if (main != null) main.close();
-        if (video != null) video.close();
-        if (isClose || System.currentTimeMillis() + retryInterval >= deadline) throw new Exception(AppData.applicationContext.getString(R.string.toast_connect_server));
-        Thread.sleep(retryInterval);
+      if (canDirect && !preferAdb && tryDirect(address, deadline)) return;
+      if (tryAdb(device, deadline)) return;
+      if (canDirect && preferAdb && tryDirect(address, deadline)) return;
+      if (isClose || System.currentTimeMillis() + retryInterval >= deadline) throw new Exception(AppData.applicationContext.getString(R.string.toast_connect_server));
+      Thread.sleep(retryInterval);
+    }
+  }
+
+  private boolean tryDirect(InetSocketAddress address, long deadline) throws Exception {
+    Socket main = null;
+    Socket video = null;
+    try {
+      // Short attempts: a port that is not reachable should not hold up the ADB path
+      long attemptDeadline = Math.min(deadline, System.currentTimeMillis() + 1500);
+      main = connectSocket(address, ROLE_MAIN, attemptDeadline);
+      video = connectSocket(address, ROLE_VIDEO, attemptDeadline);
+      OutputStream mainOut = main.getOutputStream();
+      // 带缓冲读取：readInt/readByte不再每个字节一次系统调用
+      DataInputStream mainIn = new DataInputStream(new BufferedInputStream(main.getInputStream(), 16 * 1024));
+      DataInputStream videoIn = new DataInputStream(new BufferedInputStream(video.getInputStream(), 64 * 1024));
+      synchronized (this) {
+        mainSocket = main;
+        videoSocket = video;
+        mainOutputStream = mainOut;
+        mainDataInputStream = mainIn;
+        videoDataInputStream = videoIn;
+        connectDirect = true;
+        connected = true;
       }
+      preferAdb = false;
+      abortIfClosed();
+      return true;
+    } catch (Exception e) {
+      closeQuietly(main);
+      closeQuietly(video);
+      PublicTools.logToast("stream", "direct connect failed: " + e, false);
+      if (isClose) throw new IOException("closed");
+      return false;
+    }
+  }
+
+  private boolean tryAdb(Device device, long deadline) throws Exception {
+    BufferStream main = null;
+    BufferStream video = null;
+    try {
+      if (adb == null || adb.isClosed()) adb = AdbTools.connectADB(device);
+      // 每次打开都受本次尝试剩余时间限制：ADB连接若已无声无息地失效，不会每次都卡满默认超时
+      main = adb.tcpForward(device.serverPort, (int) Math.max(1000, deadline - System.currentTimeMillis()));
+      main.write(ByteBuffer.wrap(hello(ROLE_MAIN)));
+      // 为了减少adb同步阻塞的问题，此处分开音视频流
+      video = adb.tcpForward(device.serverPort, (int) Math.max(1000, deadline - System.currentTimeMillis()));
+      video.write(ByteBuffer.wrap(hello(ROLE_VIDEO)));
+      synchronized (this) {
+        mainBufferStream = main;
+        videoBufferStream = video;
+        connectDirect = false;
+        connected = true;
+      }
+      preferAdb = true;
+      abortIfClosed();
+      return true;
+    } catch (Exception e) {
+      if (main != null) main.close();
+      if (video != null) video.close();
+      PublicTools.logToast("stream", "adb connect failed: " + e, false);
+      if (isClose) throw new IOException("closed");
+      return false;
     }
   }
 
@@ -252,6 +280,58 @@ public class ClientStream {
     closeStreams();
     if (isClose) throw new IOException("closed");
     connectServer(device, timeout);
+    negotiateUdp(device);
+  }
+
+  // Try UDP for this connection: HELLO/WELCOME proves both directions work, then ask the server to switch.
+  // Runs in the background; if UDP is not reachable (e.g. the port is only reachable through ADB) nothing changes
+  private void negotiateUdp(Device device) {
+    if (!AppData.setting.getUdpVideo() || device.isLinkDevice()) return;
+    final int connection;
+    synchronized (this) {
+      connection = ++connectionCount;
+    }
+    new Thread(() -> {
+      UdpVideoReceiver receiver = null;
+      try {
+        java.net.InetAddress ip = java.net.InetAddress.getByName(PublicTools.getIp(device.address));
+        receiver = new UdpVideoReceiver(ip, device.serverPort, token);
+        int sessionId = receiver.handshake(1500);
+        boolean sendNow;
+        synchronized (this) {
+          if (isClose || !connected || connection != connectionCount) throw new IOException("stale");
+          udpReceiver = receiver;
+          sendNow = videoStarted;
+          udpGoPending = !sendNow;
+          udpGoSession = sessionId;
+        }
+        if (sendNow) writeToMain(ControlPacket.createUdpGo(sessionId));
+        PublicTools.logToast("stream", "UDP video ready", false);
+      } catch (Exception e) {
+        PublicTools.logToast("stream", "UDP not used: " + e, false);
+        if (receiver != null && udpReceiver != receiver) receiver.close();
+      }
+    }, "easycontrol_udp_hello").start();
+  }
+
+  // Called by the player once the decoder is running
+  public void onVideoStarted() throws Exception {
+    int sessionId;
+    synchronized (this) {
+      videoStarted = true;
+      if (!udpGoPending) return;
+      udpGoPending = false;
+      sessionId = udpGoSession;
+    }
+    writeToMain(ControlPacket.createUdpGo(sessionId));
+  }
+
+  public UdpVideoReceiver getUdpReceiver() {
+    return udpReceiver;
+  }
+
+  public int getUdpFirstFrame() {
+    return udpFirstFrame;
   }
 
   public boolean isConnected() {
@@ -316,6 +396,11 @@ public class ClientStream {
 
   public ByteBuffer readFrameFromVideo() throws Exception {
     int size = readIntFromVideo();
+    if (size == -1) {
+      // Marker: the following frames come over UDP, starting with this frame number
+      udpFirstFrame = readIntFromVideo();
+      return UDP_SWITCH;
+    }
     return readByteArrayFromVideo(size);
   }
 
@@ -339,6 +424,13 @@ public class ClientStream {
   // 只关闭数据连接(不加锁：阻塞在写入上的线程需要靠关闭socket来唤醒)
   public void closeStreams() {
     connected = false;
+    synchronized (this) {
+      videoStarted = false;
+      udpGoPending = false;
+    }
+    UdpVideoReceiver receiver = udpReceiver;
+    udpReceiver = null;
+    if (receiver != null) receiver.close();
     closeQuietly(mainSocket);
     closeQuietly(videoSocket);
     BufferStream main = mainBufferStream;

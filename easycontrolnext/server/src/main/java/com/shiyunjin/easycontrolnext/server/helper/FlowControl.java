@@ -256,6 +256,11 @@ public final class FlowControl {
     System.out.flush();
   }
 
+  // Index the next sent frame will get (frames are numbered from 0 per connection)
+  public static synchronized int sentCount() {
+    return sent;
+  }
+
   // 0表示尚未有连接
   public static int targetBitrate() {
     return targetBitrate;

@@ -197,6 +197,18 @@ public final class VideoEncode {
     needResync = true;
   }
 
+  // A frame lost over UDP: the app has to restart from a keyframe. Rate-limited, since several frames
+  // can be reported lost in a row and the forced encoder restart behind prepareResync is not free
+  private static long lastLossResyncMs = 0;
+
+  public static synchronized void resyncAfterLoss() {
+    long now = System.currentTimeMillis();
+    if (now - lastLossResyncMs < 300) return;
+    lastLossResyncMs = now;
+    prepareResync();
+    requestSyncFrame();
+  }
+
   public static void requestSyncFrame() {
     lastSyncRequestMs = System.currentTimeMillis();
     try {

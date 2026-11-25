@@ -25,6 +25,8 @@ public class Adb {
   // 等待超时而放弃的OPEN：若对端稍后才回应，创建出来的流要立即关闭，不能留成“孤儿”
   private final Set<Integer> abandonedOpens = Collections.newSetFromMap(new ConcurrentHashMap<>());
   private int MAX_DATA = AdbProtocol.CONNECT_MAXDATA;
+  // Both sides support delayed_ack (see AdbProtocol.DELAYED_ACK_WINDOW)
+  private volatile boolean delayedAck = false;
   public final ConcurrentHashMap<Integer, BufferStream> connectionStreams = new ConcurrentHashMap<>(10);
   private final ConcurrentHashMap<Integer, BufferStream> openStreams = new ConcurrentHashMap<>(5);
 
@@ -32,22 +34,22 @@ public class Adb {
 
   public Adb(String address,int port, AdbKeyPair keyPair) throws Exception {
     channel = new TcpChannel(address, port);
-    connect(keyPair, AdbProtocol.CONNECT_MAXDATA_NETWORK);
+    connect(keyPair, AdbProtocol.CONNECT_MAXDATA_NETWORK, true);
   }
 
   public Adb(UsbDevice usbDevice, AdbKeyPair keyPair) throws Exception {
     if (usbDevice == null) throw new IOException("no usb connect");
     channel = new UsbChannel(usbDevice);
-    connect(keyPair, AdbProtocol.CONNECT_MAXDATA);
+    connect(keyPair, AdbProtocol.CONNECT_MAXDATA, false);
   }
 
   public Adb(AbsAdbConnectionManager manager) throws IOException, InterruptedException {
     channel = new ManagerChannel(manager, this);
   }
 
-  private void connect(AdbKeyPair keyPair, int maxData) throws Exception {
+  private void connect(AdbKeyPair keyPair, int maxData, boolean offerDelayedAck) throws Exception {
     // 连接ADB并认证
-    channel.write(AdbProtocol.generateConnect(maxData));
+    channel.write(AdbProtocol.generateConnect(maxData, offerDelayedAck));
     AdbProtocol.AdbMessage message = AdbProtocol.AdbMessage.parseAdbMessage(channel);
     if (message.command == AdbProtocol.CMD_AUTH) {
       channel.write(AdbProtocol.generateAuth(AdbProtocol.AUTH_TYPE_SIGNATURE, keyPair.signPayload(message.payload)));
@@ -62,6 +64,18 @@ public class Adb {
       throw new Exception("ADB连接失败");
     }
     MAX_DATA = message.arg1;
+    // The device banner lists its features ("device::...;features=a,b,c"); use delayed_ack only if both sides have it
+    if (offerDelayedAck && message.payload != null) {
+      byte[] banner = new byte[message.payload.remaining()];
+      message.payload.duplicate().get(banner);
+      String text = new String(banner, java.nio.charset.StandardCharsets.UTF_8);
+      int index = text.indexOf("features=");
+      if (index >= 0) {
+        for (String feature : text.substring(index + 9).split("[,;\\x00]")) {
+          if (AdbProtocol.FEATURE_DELAYED_ACK.equals(feature.trim())) delayedAck = true;
+        }
+      }
+    }
     // 启动后台进程
     handleInThread.setPriority(Thread.MAX_PRIORITY);
     handleInThread.start();
@@ -76,7 +90,7 @@ public class Adb {
 
   private BufferStream open(String destination, boolean canMultipleSend, int timeoutMs) throws InterruptedException, IOException {
     int localId = localIdPool.getAndIncrement() * (canMultipleSend ? 1 : -1);
-    writeToChannel(AdbProtocol.generateOpen(localId, destination));
+    writeToChannel(AdbProtocol.generateOpen(localId, destination, delayedAck ? AdbProtocol.DELAYED_ACK_WINDOW : 0));
     long deadline = System.currentTimeMillis() + timeoutMs;
     BufferStream bufferStream = null;
     synchronized (this) {
@@ -196,7 +210,9 @@ public class Adb {
             break;
           case AdbProtocol.CMD_WRTE:
             bufferStream.pushSource(message.payload);
-            writeToChannel(AdbProtocol.generateOkay(message.arg1, message.arg0));
+            // delayed_ack: the OKAY returns the credit; the device does not wait for it unless the window is used up
+            writeToChannel(delayedAck ? AdbProtocol.generateOkay(message.arg1, message.arg0, message.payloadLength)
+              : AdbProtocol.generateOkay(message.arg1, message.arg0));
             break;
           case AdbProtocol.CMD_CLSE:
             bufferStream.close();
@@ -252,7 +268,7 @@ public class Adb {
 
       @Override
       public void flush(BufferStream bufferStream) {
-        writeToChannel(AdbProtocol.generateOkay(localId, remoteId));
+        writeToChannel(delayedAck ? AdbProtocol.generateOkay(localId, remoteId, 0) : AdbProtocol.generateOkay(localId, remoteId));
       }
 
       @Override

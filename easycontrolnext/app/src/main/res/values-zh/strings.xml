@@ -120,6 +120,10 @@
   <string name="toast_reconnecting">连接中断，正在重连…</string>
   <string name="toast_reconnected">已重新连接</string>
   <string name="toast_float_per">需要悬浮窗权限</string>
+  <string name="set_other_udp_video">UDP传输视频</string>
+  <string name="set_other_udp_video_detail">服务端端口可直连(TCP和UDP)时自动使用。Wi-Fi丢包不再卡住画面。否则自动使用TCP</string>
+  <string name="set_other_jitter_buffer">平滑缓冲(最大毫秒)</string>
+  <string name="set_other_jitter_buffer_detail">短暂缓存画面以抵消Wi-Fi抖动。仅在网络抖动时增大，最多到此值。0=关闭(延迟最低)</string>
   <string name="toast_float_per_request">请开启“显示在其他应用的上层”权限后重新连接(小窗需要此权限)</string>
     <string name="device_pair_port">配对端口</string>
 

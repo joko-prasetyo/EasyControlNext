@@ -24,6 +24,7 @@ import com.shiyunjin.easycontrolnext.server.entity.Options;
 import com.shiyunjin.easycontrolnext.server.helper.AudioEncode;
 import com.shiyunjin.easycontrolnext.server.helper.ControlPacket;
 import com.shiyunjin.easycontrolnext.server.helper.FlowControl;
+import com.shiyunjin.easycontrolnext.server.helper.UdpVideo;
 import com.shiyunjin.easycontrolnext.server.helper.VideoEncode;
 import com.shiyunjin.easycontrolnext.server.wrappers.ClipboardManager;
 import com.shiyunjin.easycontrolnext.server.wrappers.DisplayManager;
@@ -80,6 +81,8 @@ public final class Server {
       // 先占用端口，且在修改任何设备设置之前：若同端口已有服务端(例如正处于断线等待期)，
       // 本进程直接退出，客户端会连到旧服务端继续原来的会话
       serverSocket = new ServerSocket(Options.serverPort);
+      // Same port number for UDP video (optional: the app falls back to TCP if it is unreachable)
+      UdpVideo.start(Options.serverPort);
     } catch (Exception e) {
       e.printStackTrace();
       Runtime.getRuntime().exit(1);
@@ -265,6 +268,7 @@ public final class Server {
           mainInputStream = newMainIn;
           lastKeepAliveTime = System.currentTimeMillis();
           FlowControl.reset(generation + 1);
+          UdpVideo.reset();
           attached = true;
           everAttached = true;
           generation++;
@@ -288,6 +292,7 @@ public final class Server {
       if (!attached || (gen >= 0 && gen != generation)) return;
       attached = false;
       detachedSince = System.currentTimeMillis();
+      UdpVideo.reset();
       oldMain = mainSocket;
       oldVideo = videoSocket;
       connLock.notifyAll();
@@ -429,6 +434,14 @@ public final class Server {
               // 视频确认：客户端已收到(并送入解码器)的累计帧数，用于流控
               FlowControl.onAck(in.readInt(), gen);
               break;
+            case 14:
+              // The app received our UDP WELCOME: move video to UDP
+              switchVideoToUdp(gen, in.readInt());
+              break;
+            case 15:
+              // UDP: a frame could not be completed, the decoder needs a fresh keyframe
+              VideoEncode.resyncAfterLoss();
+              break;
             default:
               // 不认识的类型无法得知其长度，继续读会把后续字节误当成命令执行(例如电源键、改分辨率)
               throw new IOException("未知控制包类型: " + type);
@@ -462,11 +475,34 @@ public final class Server {
     }
   }
 
+  // Marker [-1][next frame number] is the last packet on the TCP video socket; the following frames go over UDP,
+  // starting with a keyframe (the app keeps decoding with the same decoder)
+  private static void switchVideoToUdp(int gen, int sessionId) {
+    synchronized (videoWriteLock) {
+      if (!attached || gen != generation || !UdpVideo.activate(gen, sessionId)) return;
+      try {
+        ByteBuffer marker = ByteBuffer.allocate(8);
+        marker.putInt(-1);
+        marker.putInt(FlowControl.sentCount());
+        videoOutputStream.write(marker.array());
+      } catch (IOException e) {
+        UdpVideo.reset();
+        detach(gen, "video写入失败: " + e);
+        return;
+      }
+    }
+    VideoEncode.prepareResync();
+    VideoEncode.requestSyncFrame();
+  }
+
   public static boolean writeVideo(byte[] data, int len, int gen) {
     synchronized (videoWriteLock) {
       if (!attached || gen != generation) return false;
       try {
-        videoOutputStream.write(data, 0, len);
+        if (UdpVideo.isActive(gen)) {
+          // Frame number = index FlowControl gives this frame, so the app's acks line up with it
+          UdpVideo.sendFrame(data, 4, len - 4, FlowControl.sentCount());
+        } else videoOutputStream.write(data, 0, len);
         FlowControl.onSent(len);
         return true;
       } catch (IOException e) {
@@ -499,6 +535,7 @@ public final class Server {
         switch (i) {
           case 0:
             closeQuietly(serverSocket);
+            UdpVideo.close();
             closeQuietly(mainSocket);
             closeQuietly(videoSocket);
             break;

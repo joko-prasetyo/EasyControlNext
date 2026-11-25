@@ -185,8 +185,9 @@ public class Client {
           if (failures == 1 || (failures > 1 && failures % 4 == 0)) {
             try {
               clientStream.restartServerIfDead(device);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
               // ADB此时也连不上(网络仍中断)：继续等待
+              PublicTools.logToast("Client", "server check failed: " + e, false);
             }
           }
           failures++;
@@ -200,10 +201,11 @@ public class Client {
           if (clientController != null) clientController.stats.setReconnecting(false);
           PublicTools.logToast("Client", AppData.applicationContext.getString(R.string.toast_reconnected), true);
           return;
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+          PublicTools.logToast("Client", "reconnect attempt " + failures + " failed: " + e, false);
           try {
             Thread.sleep(500);
-          } catch (InterruptedException e) {
+          } catch (InterruptedException interrupted) {
             break;
           }
         }

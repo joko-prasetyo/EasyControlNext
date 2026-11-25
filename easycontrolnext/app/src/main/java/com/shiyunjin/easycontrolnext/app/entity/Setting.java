@@ -37,6 +37,26 @@ public final class Setting {
     editor.apply();
   }
 
+  // Video over UDP when the server port is reachable directly
+  public boolean getUdpVideo() {
+    return sharedPreferences.getBoolean("udpVideo", true);
+  }
+
+  public void setUdpVideo(boolean value) {
+    editor.putBoolean("udpVideo", value);
+    editor.apply();
+  }
+
+  // Maximum smoothness (jitter) buffer in ms; 0 = off
+  public int getJitterBufferMax() {
+    return sharedPreferences.getInt("jitterBufferMax", 100);
+  }
+
+  public void setJitterBufferMax(int value) {
+    editor.putInt("jitterBufferMax", value);
+    editor.apply();
+  }
+
   public String getLocalUUID() {
     if (!sharedPreferences.contains("UUID")) {
       editor.putString("UUID", UUID.randomUUID().toString());

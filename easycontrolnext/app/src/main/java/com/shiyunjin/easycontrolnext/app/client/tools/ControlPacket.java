@@ -80,6 +80,20 @@ public final class ControlPacket {
     return byteBuffer;
   }
 
+  // UDP WELCOME received: ask the server to send video over UDP
+  public static ByteBuffer createUdpGo(int sessionId) {
+    ByteBuffer byteBuffer = ByteBuffer.allocate(5);
+    byteBuffer.put((byte) 14);
+    byteBuffer.putInt(sessionId);
+    byteBuffer.flip();
+    return byteBuffer;
+  }
+
+  // A UDP frame could not be completed: the decoder needs a fresh keyframe
+  public static ByteBuffer createKeyframeRequest() {
+    return ByteBuffer.wrap(new byte[]{15});
+  }
+
   // 主动关闭：服务端立即退出并恢复设备设置，而不是等待重连
   public static ByteBuffer createQuitEvent() {
     return ByteBuffer.wrap(new byte[]{10});
