@@ -62,6 +62,29 @@ public final class ControlPacket {
     return ByteBuffer.wrap(new byte[]{4});
   }
 
+  // 测速：服务端原样带回sentNs并附上自己的时钟，用于计算RTT与两端时钟差(兼作心跳)
+  public static ByteBuffer createPing(long sentNs) {
+    ByteBuffer byteBuffer = ByteBuffer.allocate(9);
+    byteBuffer.put((byte) 12);
+    byteBuffer.putLong(sentNs);
+    byteBuffer.flip();
+    return byteBuffer;
+  }
+
+  // 视频确认：已收到并送入解码器的累计帧数。服务端据此判断网络是否积压(流控)
+  public static ByteBuffer createVideoAck(int frames) {
+    ByteBuffer byteBuffer = ByteBuffer.allocate(5);
+    byteBuffer.put((byte) 13);
+    byteBuffer.putInt(frames);
+    byteBuffer.flip();
+    return byteBuffer;
+  }
+
+  // 主动关闭：服务端立即退出并恢复设备设置，而不是等待重连
+  public static ByteBuffer createQuitEvent() {
+    return ByteBuffer.wrap(new byte[]{10});
+  }
+
   // 修改分辨率事件
   public static ByteBuffer createChangeResolutionEvent(float newSize) {
     ByteBuffer byteBuffer = ByteBuffer.allocate(5);

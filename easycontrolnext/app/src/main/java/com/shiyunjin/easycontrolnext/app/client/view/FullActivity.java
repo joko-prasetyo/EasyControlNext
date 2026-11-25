@@ -62,10 +62,10 @@ public class FullActivity extends Activity implements SensorEventListener {
     setButtonListener();
     setKeyEvent();
     // 更新textureView
-    activityFullBinding.textureViewLayout.addView(clientController.getTextureView(), 0);
+    activityFullBinding.textureViewLayout.addView(clientController.takeVideoView(), 0);
     activityFullBinding.textureViewLayout.post(this::updateMaxSize);
     // 页面自动旋转
-    AppData.sensorManager.registerListener(this, AppData.sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), SensorManager.SENSOR_DELAY_NORMAL);
+    updateSensorListener();
     // 监听窗口大小
     onLayoutChange = new View.OnLayoutChangeListener() {
       @Override
@@ -87,7 +87,7 @@ public class FullActivity extends Activity implements SensorEventListener {
   @Override
   protected void onPause() {
     AppData.sensorManager.unregisterListener(this);
-    if (isChangingConfigurations()) activityFullBinding.textureViewLayout.removeView(clientController.getTextureView());
+    if (isChangingConfigurations()) activityFullBinding.textureViewLayout.removeView(clientController.getVideoView());
     else if (!isClose) clientController.handleAction(device.fullToMiniOnRunning ? "changeToMini" : "changeToSmall", ByteBuffer.wrap("changeToFull".getBytes()), 0);
     super.onPause();
 
@@ -119,7 +119,7 @@ public class FullActivity extends Activity implements SensorEventListener {
     if (device == null || clientController == null) return;
     try {
       isClose = true;
-      activityFullBinding.textureViewLayout.removeView(clientController.getTextureView());
+      activityFullBinding.textureViewLayout.removeView(clientController.getVideoView());
       finish();
     } catch (Exception ignored) {
     }
@@ -159,6 +159,7 @@ public class FullActivity extends Activity implements SensorEventListener {
     activityFullBinding.buttonAutoRotate.setOnClickListener(v -> {
       autoRotate = !autoRotate;
       AppData.setting.setAutoRotate(autoRotate);
+      updateSensorListener();
       activityFullBinding.buttonAutoRotate.setImageResource(autoRotate ? R.drawable.un_auto : R.drawable.auto);
     });
   }
@@ -178,6 +179,12 @@ public class FullActivity extends Activity implements SensorEventListener {
       if (isStart && toShowView) activityFullBinding.barView.setVisibility(View.VISIBLE);
       else if (!isStart && !toShowView) activityFullBinding.barView.setVisibility(View.GONE);
     }));
+  }
+
+  // Accelerometer is only needed for auto-rotate; it used to stay registered all the time (battery)
+  private void updateSensorListener() {
+    AppData.sensorManager.unregisterListener(this);
+    if (autoRotate) AppData.sensorManager.registerListener(this, AppData.sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), SensorManager.SENSOR_DELAY_NORMAL);
   }
 
   private int lastOrientation = -1;

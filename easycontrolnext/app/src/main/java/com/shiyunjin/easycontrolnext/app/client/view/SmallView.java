@@ -85,7 +85,7 @@ public class SmallView extends ViewOutlineProvider {
     if (!device.customResolutionOnConnect && device.changeResolutionOnRunning) clientController.handleAction("writeByteBuffer", ControlPacket.createChangeResolutionEvent(0.5f), 0);
     // 显示
     AppData.windowManager.addView(smallView.getRoot(), smallViewParams);
-    smallView.textureViewLayout.addView(clientController.getTextureView(), 0);
+    smallView.textureViewLayout.addView(clientController.takeVideoView(), 0);
     ViewTools.viewAnim(smallView.getRoot(), true, 0, PublicTools.dp2px(40f), null);
     isShow = true;
   }
@@ -93,7 +93,7 @@ public class SmallView extends ViewOutlineProvider {
   public void hide() {
     if (device == null || clientController == null) return;
     try {
-      smallView.textureViewLayout.removeView(clientController.getTextureView());
+      smallView.textureViewLayout.removeView(clientController.getVideoView());
       AppData.windowManager.removeView(smallView.getRoot());
       isShow = false;
     } catch (Exception ignored) {

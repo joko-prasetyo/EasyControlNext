@@ -29,6 +29,7 @@ public class SetActivity extends Activity {
   // 设置默认值
   private void drawUi() {
     // 其他
+    activitySetBinding.setOther.addView(ViewTools.createSwitchCard(this, getString(R.string.set_other_show_stats), getString(R.string.set_other_show_stats_detail), AppData.setting.getShowStats(), isChecked -> AppData.setting.setShowStats(isChecked)).getRoot());
     activitySetBinding.setOther.addView(ViewTools.createTextCard(this, getString(R.string.set_other_ip), () -> startActivity(new Intent(this, IpActivity.class))).getRoot());
     activitySetBinding.setOther.addView(ViewTools.createTextCard(this, getString(R.string.set_other_custom_key), () -> startActivity(new Intent(this, AdbKeyActivity.class))).getRoot());
     activitySetBinding.setOther.addView(ViewTools.createTextCard(this, getString(R.string.set_other_reset_key), () -> {

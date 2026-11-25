@@ -16,6 +16,8 @@
   <string name="set_other_custom_key">自定义密钥</string>
   <string name="set_other_reset_key">重置密钥</string>
   <string name="set_other_ip">查看本机IP</string>
+  <string name="set_other_show_stats">显示串流统计</string>
+  <string name="set_other_show_stats_detail">在画面左上角以小字显示帧率与延迟(采集到解码)</string>
   <string name="set_other_locale">语言切换(中文/English)</string>
   <string name="set_about_website">项目主页</string>
   <string name="set_about_privacy">隐私政策</string>
@@ -115,7 +117,10 @@
   <string name="toast_timeout">超时</string>
   <string name="toast_connect_server">连接被控端失败</string>
   <string name="toast_stream_closed">连接断开</string>
+  <string name="toast_reconnecting">连接中断，正在重连…</string>
+  <string name="toast_reconnected">已重新连接</string>
   <string name="toast_float_per">需要悬浮窗权限</string>
+  <string name="toast_float_per_request">请开启“显示在其他应用的上层”权限后重新连接(小窗需要此权限)</string>
     <string name="device_pair_port">配对端口</string>
 
 </resources>

@@ -45,6 +45,10 @@ public final class PointersState {
     return pointers.get(pointerId);
   }
 
+  public java.util.List<Integer> ids() {
+    return new java.util.ArrayList<>(pointers.keySet());
+  }
+
   private boolean isLocalIdAvailable(int localId) {
     for (Pointer value : pointers.values()) if (value.id == localId) return false;
     return true;

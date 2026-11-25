@@ -23,7 +23,16 @@ public class AudioDecode {
   private static final int SAMPLE_RATE = 48000;
   private static final int CHANNELS = 2;
   private static final int BYTES_PER_SAMPLE = 2;
-  private static final int AUDIO_PACKET_SIZE = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * 40 / 1000;
+  private static final int BYTES_PER_FRAME = CHANNELS * BYTES_PER_SAMPLE;
+  private static final int AUDIO_PACKET_SIZE = SAMPLE_RATE * BYTES_PER_FRAME * 40 / 1000;
+  // 播放缓冲中允许积压的最大音频量。网络抖动或两端时钟漂移会让积压只增不减，
+  // 超过该值就丢弃本包，使音频延迟始终有上限
+  private static final int MAX_BUFFERED_FRAMES = SAMPLE_RATE * 100 / 1000;
+  // 已写入AudioTrack的帧数(按32位回绕，与getPlaybackHeadPosition一致)
+  private int framesWritten = 0;
+  // 普通(非FAST)流式AudioTrack要等缓冲区填满到启动阈值(默认为整个缓冲区)才开始播放，
+  // 因此必须在开始播放之后才能按积压量丢包，否则永远达不到阈值，一直静音
+  private boolean playbackStarted = false;
   private final MediaCodec.Callback callback = new MediaCodec.Callback() {
     @Override
     public void onInputBufferAvailable(@NonNull MediaCodec mediaCodec, int inIndex) {
@@ -35,7 +44,12 @@ public class AudioDecode {
       try {
         ByteBuffer buffer = decodec.getOutputBuffer(outIndex);
         if (buffer == null) return;
-        audioTrack.write(buffer, bufferInfo.size, AudioTrack.WRITE_NON_BLOCKING);
+        int head = audioTrack.getPlaybackHeadPosition();
+        if (head != 0) playbackStarted = true;
+        if (!playbackStarted || framesWritten - head <= MAX_BUFFERED_FRAMES) {
+          int written = audioTrack.write(buffer, bufferInfo.size, AudioTrack.WRITE_NON_BLOCKING);
+          if (written > 0) framesWritten += written / BYTES_PER_FRAME;
+        }
         decodec.releaseOutputBuffer(outIndex, false);
       } catch (IllegalStateException ignored) {
       }
@@ -51,21 +65,38 @@ public class AudioDecode {
   };
 
   public AudioDecode(boolean useOpus, ByteBuffer csd0, Handler playHandler) throws IOException {
-    // 创建Codec
-    setAudioDecodec(useOpus, csd0, playHandler);
-    // 创建AudioTrack
-    setAudioTrack();
-    // 创建音频放大器
-    setLoudnessEnhancer();
+    try {
+      // 创建Codec
+      setAudioDecodec(useOpus, csd0, playHandler);
+      // 创建AudioTrack
+      setAudioTrack();
+      // 创建音频放大器
+      setLoudnessEnhancer();
+    } catch (IOException | RuntimeException e) {
+      // 构造失败时释放已创建的解码器/AudioTrack，否则每次失败都会泄漏一个解码器实例
+      release();
+      throw e;
+    }
   }
 
   public void release() {
     try {
-      decodec.stop();
-      decodec.release();
-      audioTrack.stop();
-      audioTrack.release();
-      loudnessEnhancer.release();
+      if (decodec != null) decodec.stop();
+    } catch (Exception ignored) {
+    }
+    try {
+      if (decodec != null) decodec.release();
+    } catch (Exception ignored) {
+    }
+    try {
+      if (audioTrack != null) {
+        audioTrack.stop();
+        audioTrack.release();
+      }
+    } catch (Exception ignored) {
+    }
+    try {
+      if (loudnessEnhancer != null) loudnessEnhancer.release();
     } catch (Exception ignored) {
     }
   }
@@ -110,7 +141,8 @@ public class AudioDecode {
 
   // 创建AudioTrack
   private void setAudioTrack() {
-    int bufferSize = Math.min(AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 8, 16 * AUDIO_PACKET_SIZE);
+    // 缓冲区为积压上限的2倍：起播前先填满(约200ms)，之后通过丢包把积压收敛到MAX_BUFFERED_FRAMES以内
+    int bufferSize = Math.max(AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 2, (MAX_BUFFERED_FRAMES * BYTES_PER_FRAME) * 2);
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
       AudioTrack.Builder audioTrackBuild = new AudioTrack.Builder();
       // 1
@@ -127,6 +159,8 @@ public class AudioDecode {
         .setAudioFormat(audioFormat.build())
         .setTransferMode(AudioTrack.MODE_STREAM)
         .setBufferSizeInBytes(bufferSize);
+      // 不使用PERFORMANCE_MODE_LOW_LATENCY：FAST轨道上不允许挂载非硬件音效，下面的LoudnessEnhancer会创建失败。
+      // 延迟的主要来源是积压无上限，已由MAX_BUFFERED_FRAMES解决
       // 4
       audioTrack = audioTrackBuild.build();
     } else audioTrack = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT, bufferSize, AudioTrack.MODE_STREAM);
@@ -135,8 +169,13 @@ public class AudioDecode {
 
   // 创建音频放大器
   private void setLoudnessEnhancer() {
-    loudnessEnhancer = new LoudnessEnhancer(audioTrack.getAudioSessionId());
-    loudnessEnhancer.setTargetGain(3000);
-    loudnessEnhancer.setEnabled(true);
+    // 放大器是可选的：个别设备/音频策略下创建会失败，不能因此让整个音频(甚至连接)失效
+    try {
+      loudnessEnhancer = new LoudnessEnhancer(audioTrack.getAudioSessionId());
+      loudnessEnhancer.setTargetGain(3000);
+      loudnessEnhancer.setEnabled(true);
+    } catch (RuntimeException ignored) {
+      loudnessEnhancer = null;
+    }
   }
 }

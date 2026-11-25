@@ -90,6 +90,14 @@ public final class Device {
     }
   }
 
+  // 视频相对于设定尺寸的缩放百分比。只缩小编码画面(被控端自身的分辨率不变)，用于在带宽不足时降低数据量
+  private static volatile int videoScalePercent = 100;
+
+  public static void setVideoScale(int percent) {
+    videoScalePercent = percent;
+    updateSize();
+  }
+
   private static void updateSize() {
     displayInfo = DisplayManager.getDisplayInfo(displayId);
     boolean isPortrait = displayInfo.width < displayInfo.height;
@@ -98,6 +106,10 @@ public final class Device {
     if (major > Options.maxSize) {
       minor = minor * Options.maxSize / major;
       major = Options.maxSize;
+    }
+    if (videoScalePercent < 100) {
+      minor = Math.max(160, minor * videoScalePercent / 100);
+      major = Math.max(160, major * videoScalePercent / 100);
     }
     // 某些厂商实现的解码器只接受16的倍数，所以需要缩放至最近参数
     minor = minor + 8 & ~15;
@@ -203,7 +215,19 @@ public final class Device {
 
   private static final PointersState pointersState = new PointersState();
 
-  public static void touchEvent(int action, Float x, Float y, int pointerId, int offsetTime) {
+  // 断线时把仍按下的手指全部抬起，否则被控端会一直认为有手指按在屏幕上
+  public static synchronized void resetTouch() {
+    if (displayInfo == null) return;
+    for (Integer pointerId : pointersState.ids()) {
+      Pointer pointer = pointersState.get(pointerId);
+      if (pointer == null) continue;
+      int offsetTime = (int) (SystemClock.uptimeMillis() - pointer.downTime);
+      touchEvent(MotionEvent.ACTION_UP, pointer.x / displayInfo.width, pointer.y / displayInfo.height, pointerId, offsetTime);
+    }
+  }
+
+  // 与resetTouch互斥(二者在不同线程调用，共享pointersState)
+  public static synchronized void touchEvent(int action, Float x, Float y, int pointerId, int offsetTime) {
     Pointer pointer = pointersState.get(pointerId);
 
     if (pointer == null) {
@@ -215,11 +239,19 @@ public final class Device {
     pointer.y = y * displayInfo.height;
     int pointerCount = pointersState.update();
 
+    // ACTION_POINTER_DOWN/UP 需要的是该指针在本事件数组中的下标(index)，而不是指针id
+    int pointerIndex = 0;
+    for (int i = 0; i < pointerCount; i++) {
+      if (pointersState.pointerProperties[i].id == pointer.id) {
+        pointerIndex = i;
+        break;
+      }
+    }
     if (action == MotionEvent.ACTION_UP) {
       pointersState.remove(pointerId);
-      if (pointerCount > 1) action = MotionEvent.ACTION_POINTER_UP | (pointer.id << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+      if (pointerCount > 1) action = MotionEvent.ACTION_POINTER_UP | (pointerIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
     } else if (action == MotionEvent.ACTION_DOWN) {
-      if (pointerCount > 1) action = MotionEvent.ACTION_POINTER_DOWN | (pointer.id << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+      if (pointerCount > 1) action = MotionEvent.ACTION_POINTER_DOWN | (pointerIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
     }
     MotionEvent event = MotionEvent.obtain(pointer.downTime, pointer.downTime + offsetTime, action, pointerCount, pointersState.pointerProperties, pointersState.pointerCoords, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
     injectEvent(event);

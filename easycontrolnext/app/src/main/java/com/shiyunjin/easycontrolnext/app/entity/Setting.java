@@ -27,6 +27,16 @@ public final class Setting {
     editor.apply();
   }
 
+  // 画面左上角显示帧率/延迟等统计
+  public boolean getShowStats() {
+    return sharedPreferences.getBoolean("showStats", true);
+  }
+
+  public void setShowStats(boolean value) {
+    editor.putBoolean("showStats", value);
+    editor.apply();
+  }
+
   public String getLocalUUID() {
     if (!sharedPreferences.contains("UUID")) {
       editor.putString("UUID", UUID.randomUUID().toString());

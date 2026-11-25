@@ -23,11 +23,15 @@ public class AdbProtocol {
   // 最大数据大小一般为1024*1024，此处设置为15*1024，是因为有些设备USB仅支持最大16*1024，所以如果ADB使用了过大的数据，会导致USB无法传输，丢失数据，所以限制ADB协议最大为15k
   // 旧版本的adb服务端硬编码maxdata=4096，若设备实在太老，可尝试将此处修改为4096
   public static final int CONNECT_MAXDATA = 15 * 1024;
+  // 网络连接没有USB的限制，使用官方adb的最大值(对端会回复双方都支持的较小值)。
+  // adbd每发一个数据包都要等本端回复OKAY才发下一个，所以单个流的吞吐上限是 maxdata / 往返时间：
+  // 15KB在Wi-Fi往返20ms时只有约6Mbps，往返稍有抖动就低于视频码率，画面延迟会累积到一秒以上
+  public static final int CONNECT_MAXDATA_NETWORK = 1024 * 1024;
 
   public static final byte[] CONNECT_PAYLOAD = "host::\0".getBytes();
 
-  public static ByteBuffer generateConnect() {
-    return generateMessage(CMD_CNXN, CONNECT_VERSION, CONNECT_MAXDATA, CONNECT_PAYLOAD);
+  public static ByteBuffer generateConnect(int maxData) {
+    return generateMessage(CMD_CNXN, CONNECT_VERSION, maxData, CONNECT_PAYLOAD);
   }
 
   public static ByteBuffer generateAuth(int type, byte[] data) {

@@ -19,9 +19,9 @@ public final class AudioEncode {
   private static AudioRecord audioCapture;
   private static boolean useOpus;
 
-  public static boolean init() throws IOException {
+  // 是否有音频、是否Opus由Server在每次连接握手时发送
+  public static boolean init() {
     useOpus = Options.supportOpus && EncodecTools.isSupportOpus();
-    byte[] bytes = new byte[]{0};
     try {
       // 从安卓12开始支持音频
       if (!Options.isAudio || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) throw new Exception("版本低");
@@ -29,21 +29,29 @@ public final class AudioEncode {
       encedec.start();
       audioCapture = AudioCapture.init();
     } catch (Exception ignored) {
-      Server.writeMain(ByteBuffer.wrap(bytes));
       return false;
     }
-    bytes[0] = 1;
-    Server.writeMain(ByteBuffer.wrap(bytes));
-    bytes[0] = (byte) (useOpus ? 1 : 0);
-    Server.writeMain(ByteBuffer.wrap(bytes));
     return true;
+  }
+
+  public static boolean isOpus() {
+    return useOpus;
+  }
+
+  // 客户端把收到的第一个音频包当作解码器配置(csd-0)，因此每次连接都要先发送缓存的配置包
+  private static byte[] audioConfig = null;
+  private static volatile boolean needResync = true;
+
+  public static void prepareResync() {
+    needResync = true;
   }
 
   private static void setAudioEncodec() throws IOException {
     String codecMime = useOpus ? MediaFormat.MIMETYPE_AUDIO_OPUS : MediaFormat.MIMETYPE_AUDIO_AAC;
     encedec = MediaCodec.createEncoderByType(codecMime);
     MediaFormat encodecFormat = MediaFormat.createAudioFormat(codecMime, AudioCapture.SAMPLE_RATE, AudioCapture.CHANNELS);
-    encodecFormat.setInteger(MediaFormat.KEY_BIT_RATE, 128000);
+    // Opus在64kbps立体声已足够清晰；AAC-LC码率过低音质下降明显，保持128kbps
+    encodecFormat.setInteger(MediaFormat.KEY_BIT_RATE, Options.audioBit > 0 ? Options.audioBit : (useOpus ? 64000 : 128000));
     encodecFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, AudioCapture.AUDIO_PACKET_SIZE);
     encedec.configure(encodecFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
   }
@@ -70,8 +78,9 @@ public final class AudioEncode {
       do outIndex = encedec.dequeueOutputBuffer(bufferInfo, -1); while (outIndex < 0);
       ByteBuffer buffer = encedec.getOutputBuffer(outIndex);
       if (buffer == null) return;
+      boolean isConfig = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
       if (useOpus) {
-        if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+        if (isConfig) {
           buffer.getLong();
           int size = (int) buffer.getLong();
           buffer.limit(buffer.position() + size);
@@ -82,7 +91,19 @@ public final class AudioEncode {
           return;
         }
       }
-      ControlPacket.sendAudioEvent(buffer);
+      if (isConfig) {
+        audioConfig = new byte[buffer.remaining()];
+        buffer.duplicate().get(audioConfig);
+      }
+      int gen = Server.generation();
+      if (Server.isAttached()) {
+        if (needResync) {
+          if (audioConfig != null && ControlPacket.sendAudioEvent(ByteBuffer.wrap(audioConfig), gen)) {
+            needResync = false;
+            if (!isConfig) ControlPacket.sendAudioEvent(buffer, gen);
+          }
+        } else if (!isConfig) ControlPacket.sendAudioEvent(buffer, gen);
+      }
       encedec.releaseOutputBuffer(outIndex, false);
     } catch (IllegalStateException ignored) {
     }

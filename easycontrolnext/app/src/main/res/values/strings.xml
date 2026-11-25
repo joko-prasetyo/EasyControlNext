@@ -16,6 +16,8 @@
   <string name="set_other_custom_key">Custom ADB key</string>
   <string name="set_other_reset_key">Reset ADB key</string>
   <string name="set_other_ip">IP addresses</string>
+  <string name="set_other_show_stats">Show stream stats</string>
+  <string name="set_other_show_stats_detail">Small FPS and latency (capture to decode) readout in the corner of the video</string>
   <string name="set_other_locale">Change language(中文/English)</string>
   <string name="set_about_website">Homepage</string>
   <string name="set_about_privacy">Privacy Policy</string>
@@ -116,6 +118,9 @@
   <string name="toast_timeout">Timeout</string>
   <string name="toast_connect_server">Failed to connect</string>
   <string name="toast_stream_closed">Disconnected</string>
+  <string name="toast_reconnecting">Connection lost, reconnecting…</string>
+  <string name="toast_reconnected">Reconnected</string>
   <string name="toast_float_per">Need floating window permission</string>
+  <string name="toast_float_per_request">Enable \"Display over other apps\" for this app, then connect again (needed for the floating window)</string>
 
 </resources>

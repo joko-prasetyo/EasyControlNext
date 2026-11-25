@@ -3,6 +3,7 @@ package com.shiyunjin.easycontrolnext.app.adb;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 
@@ -12,7 +13,12 @@ public class TcpChannel implements AdbChannel {
   private final OutputStream outputStream;
 
   public TcpChannel(String host, int port) throws IOException {
-    socket = new Socket(host, port);
+    socket = new Socket();
+    // 每个ADB包(包括每次收到数据后回复的OKAY)都是单独一次写入，必须立即发出：
+    // 开启Nagle时OKAY会被扣留到对端确认(最长约40ms以上)，期间adbd无法发送下一个数据包
+    socket.setTcpNoDelay(true);
+    socket.setKeepAlive(true);
+    socket.connect(new InetSocketAddress(host, port), 10_000);
     inputStream = socket.getInputStream();
     outputStream = socket.getOutputStream();
   }
