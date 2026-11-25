@@ -120,6 +120,9 @@
   <string name="toast_reconnecting">连接中断，正在重连…</string>
   <string name="toast_reconnected">已重新连接</string>
   <string name="toast_float_per">需要悬浮窗权限</string>
+  <string name="notification_stream_channel">串流</string>
+  <string name="notification_stream_title">易控Next已连接</string>
+  <string name="notification_stream_text">悬浮窗模式下保持连接</string>
   <string name="set_other_udp_video">UDP传输视频</string>
   <string name="set_other_udp_video_detail">服务端端口可直连(TCP和UDP)时自动使用。Wi-Fi丢包不再卡住画面。否则自动使用TCP</string>
   <string name="set_other_jitter_buffer">平滑缓冲(最大毫秒)</string>

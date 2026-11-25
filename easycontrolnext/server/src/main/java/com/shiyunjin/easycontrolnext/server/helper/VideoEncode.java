@@ -318,17 +318,17 @@ public final class VideoEncode {
     try {
       if (!"OMX.redroid.h264.encoder".equals(encedec.getName())) return;
       if (!fileContains("/vendor/lib/libOmxCore.so", PROP_QP) && !fileContains("/vendor/lib64/libOmxCore.so", PROP_QP)) return;
-      // A fixed bitrate mode chosen by the user makes the quantizer irrelevant: leave it alone
-      String rcMode = getProp("debug.redroid.enc.rc_mode");
-      if (rcMode.isEmpty()) rcMode = getProp("persist.redroid.enc.rc_mode");
-      if (rcMode.equalsIgnoreCase("VBR") || rcMode.equalsIgnoreCase("CBR")) return;
       // A previous server that died while overriding the value left the original here
       String saved = getProp(PROP_QP_SAVED);
       if (saved.startsWith("v")) {
         setProp(PROP_QP, saved.substring(1));
         setProp(PROP_QP_SAVED, "");
       }
+      encoderProps = true;
       userQp = getProp(PROP_QP);
+      propsSignature = propsSignature();
+      // A fixed bitrate mode chosen by the user makes the quantizer irrelevant: leave it alone
+      if (userChoseBitrateMode()) return;
       baseQp = currentBaseQp();
       qpControl = true;
       LEVELS = LEVELS_QP;
@@ -345,6 +345,53 @@ public final class VideoEncode {
     return parseQp(userQp, parseQp(getProp(PROP_USER_QP), parseQp(getProp("ro.boot.redroid_enc_qp"), 31)));
   }
 
+  // --- Live encoder settings -------------------------------------------------------------------------------
+  // The encoder library reads these at every encoder start. A change made in Settings (EncoderSettings app) or with
+  // setprop used to apply only on the next connection; now it restarts the encoder within about a second.
+  private static final String[] ENCODER_PROPS = {
+    "debug.redroid.enc.qp", "debug.redroid.enc.gop", "debug.redroid.enc.rc_mode", "debug.redroid.enc.bitrate",
+    "persist.redroid.enc.qp", "persist.redroid.enc.gop", "persist.redroid.enc.rc_mode", "persist.redroid.enc.bitrate"};
+  private static final Object propsLock = new Object();
+  private static boolean encoderProps = false;
+  private static String propsSignature = null;
+
+  private static String propsSignature() {
+    StringBuilder signature = new StringBuilder();
+    for (String key : ENCODER_PROPS) signature.append(getProp(key)).append('|');
+    return signature.toString();
+  }
+
+  private static boolean userChoseBitrateMode() {
+    String rcMode = getProp("debug.redroid.enc.rc_mode");
+    if (rcMode.isEmpty()) rcMode = getProp("persist.redroid.enc.rc_mode");
+    return rcMode.equalsIgnoreCase("VBR") || rcMode.equalsIgnoreCase("CBR");
+  }
+
+  // Called once a second (heartbeat thread)
+  public static void checkEncoderSettings() {
+    if (!encoderProps) return;
+    synchronized (propsLock) {
+      String signature = propsSignature();
+      if (signature.equals(propsSignature)) return;
+      propsSignature = signature;
+      // Somebody else changed the settings (our own writes refresh the signature right away)
+      String qpNow = getProp(PROP_QP);
+      if (writtenQp != null && !qpNow.equals(writtenQp)) {
+        // The user set a QP while we had raised it: theirs wins, stop overriding
+        writtenQp = null;
+        setProp(PROP_QP_SAVED, "");
+      }
+      if (writtenQp == null) userQp = qpNow;
+      boolean bitrateMode = userChoseBitrateMode();
+      if (bitrateMode && writtenQp != null) restoreQpLocked();
+      // Switching to VBR/CBR hands the quantizer to the encoder; back to CQP lets the network ladder use it again
+      qpControl = !bitrateMode && LEVELS == LEVELS_QP;
+      System.out.println("编码设置已更改，重启编码器: " + signature);
+      System.out.flush();
+      isHasChangeConfig = true;
+    }
+  }
+
   private static int parseQp(String value, int fallback) {
     try {
       int qp = Integer.parseInt(value.trim());
@@ -359,22 +406,33 @@ public final class VideoEncode {
   private static String writtenQp = null;
 
   private static void applyQp(int delta) {
-    if (!qpControl) return;
-    if (delta <= 0) restoreQp();
-    else {
-      baseQp = currentBaseQp();
-      setProp(PROP_QP_SAVED, "v" + userQp);
-      writtenQp = String.valueOf(Math.min(MAX_QP, baseQp + delta));
-      setProp(PROP_QP, writtenQp);
+    synchronized (propsLock) {
+      if (!qpControl) return;
+      if (delta <= 0) restoreQpLocked();
+      else {
+        baseQp = currentBaseQp();
+        setProp(PROP_QP_SAVED, "v" + userQp);
+        writtenQp = String.valueOf(Math.min(MAX_QP, baseQp + delta));
+        setProp(PROP_QP, writtenQp);
+        // Our own change: the encoder restart for the new level is already on its way
+        propsSignature = propsSignature();
+      }
     }
   }
 
   private static void restoreQp() {
-    if (!qpControl || writtenQp == null) return;
+    synchronized (propsLock) {
+      restoreQpLocked();
+    }
+  }
+
+  private static void restoreQpLocked() {
+    if (writtenQp == null) return;
     // Someone else changed the property after us (a person or another tool): keep their value
     if (getProp(PROP_QP).equals(writtenQp)) setProp(PROP_QP, userQp);
     setProp(PROP_QP_SAVED, "");
     writtenQp = null;
+    propsSignature = propsSignature();
   }
 
   private static boolean fileContains(String path, String text) {

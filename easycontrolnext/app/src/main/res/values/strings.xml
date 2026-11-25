@@ -121,6 +121,9 @@
   <string name="toast_reconnecting">Connection lost, reconnecting…</string>
   <string name="toast_reconnected">Reconnected</string>
   <string name="toast_float_per">Need floating window permission</string>
+  <string name="notification_stream_channel">Streaming</string>
+  <string name="notification_stream_title">EasyControlNext is connected</string>
+  <string name="notification_stream_text">Keeps the connection alive while the window is floating</string>
   <string name="set_other_udp_video">Video over UDP</string>
   <string name="set_other_udp_video_detail">Used automatically when the server port is reachable directly (TCP and UDP). Lost Wi-Fi packets no longer stall the picture. Falls back to TCP otherwise</string>
   <string name="set_other_jitter_buffer">Smoothness buffer (max ms)</string>

@@ -28,8 +28,13 @@ public final class JitterBuffer {
   private static final long BASE_WINDOW_US = 10_000_000;
   private static final long JITTER_WINDOW_US = 4_000_000;
   private static final long PERCENTILE_EVERY_US = 250_000;
-  // Shrink D by this much per frame when the network calms down (~30 ms/s at 60 fps)
-  private static final long DECAY_PER_FRAME_US = 500;
+  // Shrink D by this much per second when the network calms down. Per second, not per frame: a game at 30 fps
+  // used to take twice as long (100 ms -> 0 in ~7 s)
+  private static final long DECAY_PER_SECOND_US = 30_000;
+  // A frame later than this is a network stall (Wi-Fi dropout of seconds), not jitter. No buffer within the
+  // user's cap could have hidden it, and counting it kept D at the maximum for 4 s after the network was back,
+  // then ~7 s more to decay: ~100 ms extra latency for 10 s after every dropout
+  private static final long STALL_MIN_US = 300_000;
   // Hard cap on queued frames (memory). The real limit is QUEUE_SLACK_US below
   private static final int QUEUE_CAPACITY = 240;
   // Never hold more than maxDelay + this much video. If the decoder is slower than the stream, frames would
@@ -39,6 +44,7 @@ public final class JitterBuffer {
   private static final long QUEUE_SLACK_US = 250_000;
 
   private final long maxDelayUs;
+  private final long stallUs;
   private final Sink sink;
   private final LinkedBlockingDeque<Entry> queue = new LinkedBlockingDeque<>(QUEUE_CAPACITY);
   private final Thread thread;
@@ -55,6 +61,7 @@ public final class JitterBuffer {
   private long percentile95Us = 0;
   private volatile long baseUs = Long.MIN_VALUE;
   private volatile long delayUs = 0;
+  private long lastPushUs = 0;
 
   private static final class Entry {
     final ByteBuffer frame;
@@ -68,6 +75,7 @@ public final class JitterBuffer {
 
   public JitterBuffer(int maxDelayMs, Sink sink) {
     this.maxDelayUs = maxDelayMs * 1000L;
+    this.stallUs = Math.max(STALL_MIN_US, 2 * maxDelayUs);
     this.sink = sink;
     thread = new Thread(this::run, "easycontrol_jitter");
     thread.start();
@@ -86,18 +94,22 @@ public final class JitterBuffer {
     while (baseWindow.peekFirst()[0] < nowUs - BASE_WINDOW_US) baseWindow.pollFirst();
     long base = baseWindow.peekFirst()[1];
     baseUs = base;
-    // How late this frame was compared with the fastest path
-    jitterTime[jitterNext] = nowUs;
-    jitterValue[jitterNext] = offset - base;
-    jitterNext = (jitterNext + 1) % jitterTime.length;
-    if (jitterCount < jitterTime.length) jitterCount++;
+    // How late this frame was compared with the fastest path (stalls are left out, see STALL_MIN_US)
+    if (offset - base <= stallUs) {
+      jitterTime[jitterNext] = nowUs;
+      jitterValue[jitterNext] = offset - base;
+      jitterNext = (jitterNext + 1) % jitterTime.length;
+      if (jitterCount < jitterTime.length) jitterCount++;
+    }
     if (nowUs - lastPercentileUs >= PERCENTILE_EVERY_US) {
       lastPercentileUs = nowUs;
       percentile95Us = percentile95(nowUs);
     }
     long target = Math.min(maxDelayUs, percentile95Us);
     long current = delayUs;
-    delayUs = target > current ? target : Math.max(target, current - DECAY_PER_FRAME_US);
+    long elapsedUs = lastPushUs == 0 ? 0 : Math.max(0, nowUs - lastPushUs);
+    lastPushUs = nowUs;
+    delayUs = target > current ? target : Math.max(target, current - DECAY_PER_SECOND_US * elapsedUs / 1_000_000);
     queue.putLast(new Entry(frame, ptsUs));
     while (!stopped && queuedDurationUs() > maxDelayUs + QUEUE_SLACK_US) LockSupport.parkNanos(2_000_000);
   }

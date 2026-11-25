@@ -7,7 +7,11 @@
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" /> <!-- 悬浮窗 -->
   <uses-permission android:name="android.permission.SYSTEM_OVERLAY_WINDOW" />
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" /> <!-- WIFI状态 -->
-  <uses-permission android:name="android.permission.WAKE_LOCK" /> <!-- 串流期间保持Wi-Fi低延迟模式(WifiLock) -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <!-- 串流期间的前台服务：悬浮窗模式下App没有前台界面，省电模式会切断其网络 -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> <!-- 串流期间保持Wi-Fi低延迟模式(WifiLock) -->
   <uses-permission android:name="android.permission.USB_PERMISSION" /> <!-- USB -->
   <uses-feature android:name="android.hardware.usb.host" />
 
@@ -23,6 +27,11 @@
     android:roundIcon="${app_icon_round}"
     android:supportsRtl="true"
     android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+    <service
+      android:name="com.shiyunjin.easycontrolnext.app.client.StreamService"
+      android:exported="false"
+      android:foregroundServiceType="mediaPlayback" />
 
     <activity
       android:name="com.shiyunjin.easycontrolnext.app.MainActivity"

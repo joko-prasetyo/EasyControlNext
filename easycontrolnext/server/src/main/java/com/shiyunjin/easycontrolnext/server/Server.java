@@ -350,6 +350,8 @@ public final class Server {
       } catch (InterruptedException e) {
         return;
       }
+      // Encoder settings changed in Settings / setprop: apply them now instead of on the next connection
+      if (attached) VideoEncode.checkEncoderSettings();
       long now = System.currentTimeMillis();
       if (attached) {
         int gen = generation;

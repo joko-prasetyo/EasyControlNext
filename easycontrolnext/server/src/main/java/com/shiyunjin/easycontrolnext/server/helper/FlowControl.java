@@ -64,7 +64,17 @@ public final class FlowControl {
 
   // 实际输出码率统计与档位
   private static final long OUTPUT_WINDOW_MS = 3000;
-  private static final long LEVEL_UP_DWELL_MS = 10_000;
+  // 恢复一档前至少稳定这么久。刚恢复一档(15秒内)又积压，说明网络带不动那一档：下次等待时间加倍，最多40秒，
+  // 减少反复试探造成的延迟尖峰；60秒没有积压后回到10秒。
+  // (试过3秒：网络恢复后画质回来得快很多，但信号一直差时频繁试探，延迟超过300 ms的帧翻倍。延迟优先)
+  private static final long LEVEL_UP_DWELL_MIN_MS = 10_000;
+  private static final long LEVEL_UP_DWELL_MAX_MS = 40_000;
+  private static final long LEVEL_UP_FAILED_MS = 15_000;
+  private static final long LEVEL_UP_DWELL_RESET_MS = 60_000;
+  // 一次积压最多降这么多档：信号快断时测得的送达速度很低(例如459 kbps)，并不代表网络恢复后的能力
+  private static final int MAX_LEVELS_DOWN = 3;
+  private static long levelUpDwellMs = LEVEL_UP_DWELL_MIN_MS;
+  private static long lastLevelUpMs = 0;
   // 各档位相对于0档的大致数据量；编码器决定可用的档位(见VideoEncode.LEVELS)
   private static int[] LEVEL_PERCENT = {100, 68, 48, 25};
   private static long windowStartMs = 0;
@@ -98,6 +108,8 @@ public final class FlowControl {
     lastRaiseMs = System.currentTimeMillis();
     level = 0;
     lastLevelChangeMs = 0;
+    levelUpDwellMs = LEVEL_UP_DWELL_MIN_MS;
+    lastLevelUpMs = 0;
     windowStartMs = 0;
     windowBytes = 0;
     windowDisturbed = false;
@@ -181,11 +193,18 @@ public final class FlowControl {
     int before = targetBitrate;
     targetBitrate = Math.max(floor, Math.min(targetBitrate, delivered * 4 / 5));
     int levelBefore = level;
-    int max = LEVEL_PERCENT.length - 1;
+    // 刚恢复一档就积压：那一档网络带不动，下次多等一会再试
+    if (lastLevelUpMs != 0 && now - lastLevelUpMs < LEVEL_UP_FAILED_MS) {
+      levelUpDwellMs = Math.min(LEVEL_UP_DWELL_MAX_MS, levelUpDwellMs * 2);
+      lastLevelUpMs = 0;
+    }
+    int max = Math.min(LEVEL_PERCENT.length - 1, level + MAX_LEVELS_DOWN);
     int newLevel = level;
-    // 预计发送速度降到送达速度的80%以内的最低档位；至少降一档(积压已经确认)
+    // 预计发送速度降到送达速度的80%以内的最低档位
     while (newLevel < max && (long) sending * LEVEL_PERCENT[newLevel] / LEVEL_PERCENT[level] > delivered * 4L / 5) newLevel++;
-    if (newLevel == level && level < max) newLevel = level + 1;
+    // 发出仍多于送达：至少降一档。发出已少于送达说明积压正在排空(刚降的档已经生效)，只需等待；
+    // 以前这里也会再降一档，一次积压连降三档(0->3->4->5)
+    if (newLevel == level && level < max && sending > delivered) newLevel = level + 1;
     if (newLevel != level) setLevel(newLevel, now);
     log("持续积压(延迟 " + lag + " ms)：发出 " + sending / 1000 + " kbps，送达 " + delivered / 1000 + " kbps，码率 " + before / 1000
       + " -> " + targetBitrate / 1000 + " kbps，档位 " + levelBefore + " -> " + level);
@@ -231,13 +250,16 @@ public final class FlowControl {
     if (outputBps > targetBitrate * (networkLimited ? 11L : 15L) / 10) {
       // 选出预计能降到目标以内的最低档位
       while (newLevel < max && (long) outputBps * LEVEL_PERCENT[newLevel] / LEVEL_PERCENT[level] > targetBitrate * 11L / 10) newLevel++;
-    } else if (level > 0 && now - lastLevelChangeMs > LEVEL_UP_DWELL_MS && now - lastBacklogMs > LEVEL_UP_DWELL_MS
+    } else if (level > 0 && now - lastLevelChangeMs > levelUpDwellMs && now - lastBacklogMs > levelUpDwellMs
       && (long) outputBps * LEVEL_PERCENT[level - 1] / LEVEL_PERCENT[level] < Math.min(targetBitrate, capacityBps > 0 ? capacityBps : Integer.MAX_VALUE) * 9L / 10) {
       // 恢复上一档后预计仍有余量：逐级恢复
       newLevel = level - 1;
     }
+    if (now - lastBacklogMs > LEVEL_UP_DWELL_RESET_MS) levelUpDwellMs = LEVEL_UP_DWELL_MIN_MS;
     if (newLevel == level) return;
-    log("实际输出 " + outputBps / 1000 + " kbps，目标 " + targetBitrate / 1000 + " kbps：档位 " + level + " -> " + newLevel);
+    lastLevelUpMs = newLevel < level ? now : 0;
+    log("实际输出 " + outputBps / 1000 + " kbps，目标 " + targetBitrate / 1000 + " kbps：档位 " + level + " -> " + newLevel
+      + (newLevel < level ? "(下次恢复间隔 " + levelUpDwellMs / 1000 + " 秒)" : ""));
     setLevel(newLevel, now);
   }
 

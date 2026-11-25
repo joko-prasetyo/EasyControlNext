@@ -59,6 +59,8 @@ public class Client {
       if (bool) {
         allClient.put(device.uuid, this);
         acquireWifiLock();
+        // Keeps the network allowed while the app is only a floating window (see StreamService)
+        StreamService.update(AppData.applicationContext, allClient.size());
         // 控制器、播放器
         clientController = new ClientController(device, clientStream, this::startPlayer);
         // 临时设备
@@ -253,6 +255,7 @@ public class Client {
     if (!isTempDevice) AppData.dbHelper.update(device);
     allClient.remove(device.uuid);
     releaseWifiLock();
+    StreamService.update(AppData.applicationContext, allClient.size());
     // 运行断开时操作
     if (clientController != null) {
       if (!isTempDevice && device.lockOnClose) clientController.handleAction("buttonLock", null, 0);
