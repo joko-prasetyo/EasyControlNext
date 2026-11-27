@@ -25,6 +25,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 //  - a frame that is still incomplete FRAME_DEADLINE_MS after its first packet (or that never showed up while
 //    later frames did) is given up: the app asks for a keyframe and skips frames until one arrives, so the
 //    decoder never gets a frame whose references are missing. Waiting longer would only add latency.
+// The limits below are for a LAN. On a long link (VPN, mobile data) a re-sent packet needs a full round trip,
+// so they are stretched by the measured RTT: with a 210 ms round trip the old 150 ms deadline gave up every
+// frame that lost a packet, and the keyframe it then asked for took longer than the re-sent packet would have.
 // Frames are handed out strictly in order. Skipped frames are still reported (data == null) so the
 // acknowledgements to the server keep moving and its flow control does not mistake a loss for a backlog.
 public final class UdpVideoReceiver {
@@ -58,6 +61,10 @@ public final class UdpVideoReceiver {
   private static final long KEYFRAME_DEADLINE_MS = 600;
   private static final long ABSENT_FRAME_DEADLINE_MS = 100;
   private static final long KEEPALIVE_MS = 1000;
+  private static final long KEYFRAME_REQUEST_INTERVAL_MS = 300;
+
+  // Round trip to the server (ms), from the control channel's ping
+  private volatile int rttMs = 0;
 
   private final DatagramSocket socket;
   private final InetSocketAddress server;
@@ -108,6 +115,27 @@ public final class UdpVideoReceiver {
       out.flip();
       return out;
     }
+  }
+
+  public void setRttMs(int ms) {
+    rttMs = Math.max(0, Math.min(ms, 2000));
+  }
+
+  // Each limit is at least its LAN value; on a long link it leaves time for one re-send (two for a keyframe)
+  private long nackIntervalMs() {
+    return Math.max(NACK_INTERVAL_MS, rttMs * 5L / 4 + 10);
+  }
+
+  private long missingForgetMs() {
+    return Math.max(MISSING_FORGET_MS, 3L * rttMs + 200);
+  }
+
+  private long frameDeadlineMs(boolean key) {
+    return key ? Math.max(KEYFRAME_DEADLINE_MS, 2L * rttMs + 200) : Math.max(FRAME_DEADLINE_MS, rttMs + 100L);
+  }
+
+  private long absentFrameDeadlineMs() {
+    return Math.max(ABSENT_FRAME_DEADLINE_MS, rttMs + 80L);
   }
 
   public UdpVideoReceiver(InetAddress serverIp, int port, byte[] token) throws IOException {
@@ -236,16 +264,18 @@ public final class UdpVideoReceiver {
 
   private void sendNacks(long now) {
     if (missing.isEmpty()) return;
+    long forgetMs = missingForgetMs();
+    long intervalMs = nackIntervalMs();
     List<Integer> request = new ArrayList<>();
     Iterator<Map.Entry<Integer, long[]>> it = missing.entrySet().iterator();
     while (it.hasNext()) {
       Map.Entry<Integer, long[]> entry = it.next();
       long[] state = entry.getValue();
-      if (now - state[0] > MISSING_FORGET_MS || state[2] >= NACK_MAX_TRIES) {
+      if (now - state[0] > forgetMs || state[2] >= NACK_MAX_TRIES) {
         it.remove();
         continue;
       }
-      boolean due = state[2] == 0 ? now - state[0] >= NACK_FIRST_MS : now - state[1] >= NACK_INTERVAL_MS;
+      boolean due = state[2] == 0 ? now - state[0] >= NACK_FIRST_MS : now - state[1] >= intervalMs;
       if (due && request.size() < 200) {
         request.add(entry.getKey());
         state[1] = now;
@@ -278,10 +308,10 @@ public final class UdpVideoReceiver {
         continue;
       }
       boolean lost;
-      if (assembly != null) lost = now - assembly.firstSeenMs > (assembly.key ? KEYFRAME_DEADLINE_MS : FRAME_DEADLINE_MS);
+      if (assembly != null) lost = now - assembly.firstSeenMs > frameDeadlineMs(assembly.key);
       else {
         Map.Entry<Integer, Assembly> later = assemblies.higherEntry(nextFrame);
-        lost = later != null && now - later.getValue().firstSeenMs > ABSENT_FRAME_DEADLINE_MS;
+        lost = later != null && now - later.getValue().firstSeenMs > absentFrameDeadlineMs();
       }
       if (!lost) return;
       assemblies.remove(nextFrame);
@@ -289,7 +319,8 @@ public final class UdpVideoReceiver {
       nextFrame++;
       skipping = true;
       statSkipped++;
-      if (now - lastKeyframeRequestMs > 300) {
+      // The keyframe takes at least a round trip to arrive; asking again sooner only adds another big frame
+      if (now - lastKeyframeRequestMs > Math.max(KEYFRAME_REQUEST_INTERVAL_MS, 2L * rttMs)) {
         lastKeyframeRequestMs = now;
         statKeyRequests++;
         if (keyframeRequest != null) keyframeRequest.request();

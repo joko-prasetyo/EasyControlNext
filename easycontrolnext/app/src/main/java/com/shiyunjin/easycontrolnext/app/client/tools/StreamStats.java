@@ -90,6 +90,15 @@ public final class StreamStats {
     hasOffset = true;
   }
 
+  // Typical round trip over the recent samples (median, ms): how long a re-sent packet takes to come back.
+  // 0 before the first sample
+  public synchronized int medianRttMs() {
+    if (sampleCount == 0) return 0;
+    long[] sorted = Arrays.copyOf(sampleRttUs, sampleCount);
+    Arrays.sort(sorted);
+    return (int) (sorted[sampleCount / 2] / 1000);
+  }
+
   public void setReconnecting(boolean reconnecting) {
     this.reconnecting = reconnecting;
   }

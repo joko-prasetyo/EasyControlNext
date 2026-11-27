@@ -100,6 +100,8 @@ public class ClientPlayer {
           case PONG_EVENT:
             ByteBuffer pong = clientStream.readByteArrayFromMain(16);
             clientController.stats.onPong(pong.getLong(), pong.getLong());
+            UdpVideoReceiver udpReceiver = clientStream.getUdpReceiver();
+            if (udpReceiver != null) udpReceiver.setRttMs(clientController.stats.medianRttMs());
             break;
           default:
             // 无法得知未知类型的长度，继续读只会错位

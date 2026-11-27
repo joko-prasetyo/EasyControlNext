@@ -31,6 +31,13 @@ public final class FlowControl {
   private static final long CLEAR_LAG_MS = 200;
   // 实测手机Wi-Fi卡顿最长约1.3秒，留出余量
   private static final long HARD_LAG_MS = 2000;
+  // 以上阈值都是“超出链路固有延迟”的部分。固有延迟 = 最近BASE_WINDOW_MS内确认延迟的最小值(往返时间+确认间隔)，
+  // 局域网约几十毫秒，远程(VPN、移动网络)可达200~300 ms。直接比较绝对值时，高延迟链路上稍有抖动就超过400 ms，
+  // 被误判为持续积压，画质一路降到最低(实测：往返210 ms的ZeroTier链路，只发出25 kbps也被判为积压)
+  private static final long BASE_WINDOW_MS = 10_000;
+  private static final long BASE_MAX_MS = 1000;
+  private static long baseLagMs = 0;
+  private static long baseLagAtMs = 0;
 
   private static final int RING = 1024;
   private static final long[] sentAt = new long[RING];
@@ -99,6 +106,8 @@ public final class FlowControl {
     ackedBytes = 0;
     sentBytesTotal = 0;
     lastAckProgressMs = 0;
+    baseLagMs = 0;
+    baseLagAtMs = 0;
     ackSeen = false;
     paused = false;
     backlogSinceMs = 0;
@@ -132,8 +141,15 @@ public final class FlowControl {
     if (count <= acked) return;
     for (int i = acked; i < count; i++) ackedBytes += sentBytes[i & (RING - 1)];
     acked = count;
-    lastAckProgressMs = System.currentTimeMillis();
+    long now = System.currentTimeMillis();
+    lastAckProgressMs = now;
     if (backlogSinceMs != 0) backlogAckEvents++;
+    // 最新确认的帧延迟最小，作为固有延迟的样本；窗口内的最小值过期后用当前样本重新开始
+    long sample = Math.min(BASE_MAX_MS, Math.max(0, now - sentAt[(count - 1) & (RING - 1)]));
+    if (baseLagAtMs == 0 || sample <= baseLagMs || now - baseLagAtMs > BASE_WINDOW_MS) {
+      baseLagMs = sample;
+      baseLagAtMs = now;
+    }
   }
 
   // 每个待发送的视频帧调用一次
@@ -149,7 +165,9 @@ public final class FlowControl {
       return RESUME;
     }
     long lag = acked < sent ? now - sentAt[acked & (RING - 1)] : 0;
-    if (lag > HARD_LAG_MS || sent - acked >= RING) {
+    // 超出链路固有延迟的部分才是积压
+    long excess = lag - baseLagMs;
+    if (excess > HARD_LAG_MS || sent - acked >= RING) {
       // 长时间断流：不再往网络里塞数据，恢复后直接跳到最新画面
       paused = true;
       pausedSinceMs = now;
@@ -158,7 +176,7 @@ public final class FlowControl {
       log("长时间断流(最早未确认帧已发出 " + lag + " ms，在途 " + (sent - acked) + " 帧)：暂停发送视频");
       return DROP;
     }
-    if (lag > BACKLOG_LAG_MS) {
+    if (excess > BACKLOG_LAG_MS) {
       windowDisturbed = true;
       if (backlogSinceMs == 0) startBacklogWindow(now);
       else if (now - backlogSinceMs >= BACKLOG_HOLD_MS) {
@@ -167,7 +185,7 @@ public final class FlowControl {
         // 卡顿(确认停滞)时只等待；无论哪种情况都开始新的观察窗口
         startBacklogWindow(now);
       }
-    } else if (lag < CLEAR_LAG_MS) backlogSinceMs = 0;
+    } else if (excess < CLEAR_LAG_MS) backlogSinceMs = 0;
     maybeRaise(now);
     return SEND;
   }
@@ -186,12 +204,16 @@ public final class FlowControl {
     int delivered = (int) Math.min(Integer.MAX_VALUE, (ackedBytes - backlogAckedBytes0) * 8_000 / duration);
     int sending = (int) Math.min(Integer.MAX_VALUE, (sentBytesTotal - backlogSentBytes0) * 8_000 / duration);
     if (delivered <= 0) return;
-    capacityBps = delivered;
     lastBacklogMs = now;
     lastRaiseMs = now;
-    int floor = Math.min(Options.maxVideoBit, Math.max(Options.maxVideoBit / 8, 300_000));
     int before = targetBitrate;
-    targetBitrate = Math.max(floor, Math.min(targetBitrate, delivered * 4 / 5));
+    // 发出不多于送达时，“送达速度”只反映了发出了多少(画面静止、积压正在排空)，不代表网络能力，不据此降码率。
+    // 以前会把码率从4000降到500 kbps(实测：发出25 kbps，送达174 kbps)，之后正常画面的输出都“超过目标”，档位被一路降低
+    if (sending > delivered) {
+      capacityBps = delivered;
+      int floor = Math.min(Options.maxVideoBit, Math.max(Options.maxVideoBit / 8, 300_000));
+      targetBitrate = Math.max(floor, Math.min(targetBitrate, delivered * 4 / 5));
+    }
     int levelBefore = level;
     // 刚恢复一档就积压：那一档网络带不动，下次多等一会再试
     if (lastLevelUpMs != 0 && now - lastLevelUpMs < LEVEL_UP_FAILED_MS) {
@@ -206,7 +228,7 @@ public final class FlowControl {
     // 以前这里也会再降一档，一次积压连降三档(0->3->4->5)
     if (newLevel == level && level < max && sending > delivered) newLevel = level + 1;
     if (newLevel != level) setLevel(newLevel, now);
-    log("持续积压(延迟 " + lag + " ms)：发出 " + sending / 1000 + " kbps，送达 " + delivered / 1000 + " kbps，码率 " + before / 1000
+    log("持续积压(延迟 " + lag + " ms，固有 " + baseLagMs + " ms)：发出 " + sending / 1000 + " kbps，送达 " + delivered / 1000 + " kbps，码率 " + before / 1000
       + " -> " + targetBitrate / 1000 + " kbps，档位 " + levelBefore + " -> " + level);
   }
 
